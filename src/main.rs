@@ -149,6 +149,46 @@ fn parse_bdf(text: &str, cell_w: usize, cell_h: usize) -> Font {
     }
 }
 
+/// Parse a unifont-style `.hex` font (`CODEPOINT:16-hex-digit bitmap`, one
+/// byte per row of an 8x8 glyph). Baseline sits at row 7 (`ascent` 7 with a
+/// one-pixel descender row), matching the eval renderer.
+fn parse_hex(text: &str) -> Font {
+    let mut glyphs = HashMap::new();
+    for line in text.lines() {
+        let Some((cp, bits)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(enc) = u32::from_str_radix(cp.trim(), 16) else {
+            continue;
+        };
+        let bits = bits.trim();
+        if bits.len() != 16 {
+            continue;
+        }
+        let rows: Vec<u8> = (
+            0..8
+        )
+        .map(|i| u8::from_str_radix(&bits[i * 2..i * 2 + 2], 16).unwrap_or(0))
+        .collect();
+        glyphs.insert(
+            enc,
+            Glyph {
+                w: 8,
+                h: 8,
+                xoff: 0,
+                yoff: -1,
+                rows,
+            },
+        );
+    }
+    Font {
+        glyphs,
+        ascent: 7,
+        cell_w: 8,
+        cell_h: 8,
+    }
+}
+
 fn parse_ttf(data: &[u8], px: f32, cell_w: usize, cell_h: usize) -> TtfFont {
     let face = TtfFace::from_bytes(data, FontSettings::default()).expect("bundled font must parse");
     let supported = face.chars().keys().copied().collect();
@@ -169,21 +209,37 @@ fn parse_ttf(data: &[u8], px: f32, cell_w: usize, cell_h: usize) -> TtfFont {
 // Font resolution (global lazy singletons)
 // ============================================================================
 
+fn font_5x8() -> Font {
+    parse_bdf(include_str!("../fonts/5x8.bdf"), 5, 8)
+}
+
+fn font_8x8() -> Font {
+    parse_hex(include_str!("../fonts/unscii-8.hex"))
+}
+
 fn font_8x13() -> Font {
     parse_bdf(include_str!("../fonts/8x13.bdf"), 8, 13)
 }
 
+fn font_6x12() -> Font {
+    parse_bdf(include_str!("../fonts/6x12.bdf"), 6, 12)
+}
+
+fn font_silver() -> TtfFont {
+    parse_ttf(
+        include_bytes!("../fonts/Silver.ttf"),
+        16.0,
+        16,
+        16,
+    )
+}
+
 fn get_font_6x12() -> Result<Font, String> {
-    let data = std::fs::read_to_string("fonts/6x12.bdf")
-        .map_err(|e| format!("Cannot load fonts/6x12.bdf: {e} (required for 6x12-dim shape)"))?;
-    Ok(parse_bdf(&data, 6, 12))
+    Ok(font_6x12())
 }
 
 fn get_font_silver() -> Result<TtfFont, String> {
-    let data = std::fs::read("fonts/Silver.ttf").map_err(|e| {
-        format!("Cannot load fonts/Silver.ttf: {e} (required for silver16-bw shape)")
-    })?;
-    Ok(parse_ttf(&data, 16.0, 16, 16))
+    Ok(font_silver())
 }
 
 enum RenderFont {
@@ -217,11 +273,13 @@ impl RenderFont {
 
 fn resolve_font(name: &str) -> Result<RenderFont, String> {
     match name {
+        "5x8" => Ok(RenderFont::Bitmap(font_5x8())),
+        "8x8" => Ok(RenderFont::Bitmap(font_8x8())),
         "8x13" => Ok(RenderFont::Bitmap(font_8x13())),
         "6x12" => get_font_6x12().map(RenderFont::Bitmap),
         "silver" => get_font_silver().map(RenderFont::Ttf),
         _ => Err(format!(
-            "Unknown font {name:?}: expected \"8x13\", \"6x12\", or \"silver\""
+            "Unknown font {name:?}: expected \"5x8\", \"8x8\", \"8x13\", \"6x12\", or \"silver\""
         )),
     }
 }
@@ -1092,6 +1150,12 @@ fn dim_stopwords(text: &str) -> String {
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum Shape {
+    /// 5x8 BDF font (legacy shape), black ink.
+    #[value(name = "5x8-bw")]
+    S5x8Bw,
+    /// 8x8 unscii-8 hex font (Latin-1 subset), black ink.
+    #[value(name = "8x8-bw")]
+    S8x8Bw,
     /// 8x13 glyphs on an 11px advance (extra tracking), black ink.
     #[value(name = "11on16-bw")]
     S11on16Bw,
@@ -1121,6 +1185,22 @@ struct ShapeParams {
 impl Shape {
     fn params(&self) -> ShapeParams {
         match self {
+            Shape::S5x8Bw => ShapeParams {
+                font_name: "5x8",
+                cell_width: 5,
+                cell_height: 8,
+                black_ink: true,
+                stopword_dim: false,
+                is_ttf: false,
+            },
+            Shape::S8x8Bw => ShapeParams {
+                font_name: "8x8",
+                cell_width: 8,
+                cell_height: 8,
+                black_ink: true,
+                stopword_dim: false,
+                is_ttf: false,
+            },
             Shape::S11on16Bw => ShapeParams {
                 font_name: "8x13",
                 cell_width: 11,
@@ -1166,6 +1246,8 @@ impl Shape {
 
     fn name(&self) -> &'static str {
         match self {
+            Shape::S5x8Bw => "5x8-bw",
+            Shape::S8x8Bw => "8x8-bw",
             Shape::S11on16Bw => "11on16-bw",
             Shape::S8on22Bw => "8on22-bw",
             Shape::S8on16Bw => "8on16-bw",
@@ -1229,6 +1311,8 @@ fn main() {
 
     // Resolve font
     let render_font = match shape_params.font_name {
+        "5x8" => RenderFont::Bitmap(font_5x8()),
+        "8x8" => RenderFont::Bitmap(font_8x8()),
         "8x13" => RenderFont::Bitmap(font_8x13()),
         "6x12" => match get_font_6x12() {
             Ok(f) => RenderFont::Bitmap(f),
